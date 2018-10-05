@@ -1,0 +1,117 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Parameters:
+  AccessKeyId:
+    Description: ESP Access Key Id
+    Type: String
+    Default: ""
+  SecretAccessKey:
+    Description: ESP Secret Access Key
+    Default: ""
+    Type: String
+  SourceCodeS3Bucket:
+    Description: S3 Location of source code
+    Default: ""
+    Type: String
+  ReportS3Bucket:
+    Description: S3 Bucket to place csv report
+    Default: ""
+    Type: String
+  ReportInterval:
+    Description: Specify interval for report in minutes/hours/days eg, 5 minutes, 30 days - https://docs.aws.amazon.com/AmazonCloudWatch/latest/events/ScheduledEvents.html#RateExpressions
+    Default: "5 minutes"
+    Type: String
+Resources:
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      AccessControl: Private
+      BucketName: !Ref 'ReportS3Bucket'
+  BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref 'ReportS3Bucket'
+      PolicyDocument:
+          Statement:
+            Effect: "Allow"
+            Action: s3:PutObject
+            Resource: !Join ["", ["arn:aws:s3:::", !Ref 'ReportS3Bucket', "/*"]]
+            Principal: 
+              AWS:
+                - !GetAtt 'EvidentReportingLambdaExecutionRole.Arn'
+  MyInvokePermission:
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt 'MyLambda.Arn'
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt 'MyRule.Arn'
+    Type: AWS::Lambda::Permission
+  EvidentReportingLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+      Path: /
+      Policies:
+        - PolicyName: Reporting-Lambda-Policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Action: logs:*
+                Effect: Allow
+                Resource: arn:aws:logs:*:*:*
+              - Action:
+                  - s3:GetBucketLocation
+                  - s3:GetObject
+                  - s3:ListBucket
+                  - s3:ListBucketMultipartUploads
+                Effect: Allow
+                Resource:
+                  - !Join
+                    - ''
+                    - - 'arn:aws:s3:::'
+                      - !Ref 'SourceCodeS3Bucket'
+                  - !Join
+                    - ''
+                    - - 'arn:aws:s3:::'
+                      - !Ref 'SourceCodeS3Bucket'
+                      - '*'
+              - Action: s3:PutObject
+                Effect: Allow
+                Resource:
+                  - !Join
+                    - ''
+                    - - 'arn:aws:s3::::'
+                      - !Ref 'ReportS3Bucket'
+                      - '*'
+  MyLambda:
+    Properties:
+      Code:
+        S3Bucket: !Ref 'SourceCodeS3Bucket'
+        S3Key: externalaccounts.zip
+      Description: Lambda task that runs every minute.
+      Environment:
+        Variables:
+          AccessKeyId: !Ref "AccessKeyId"
+          SecretAccessKey: !Ref "SecretAccessKey"
+          TargetS3Bucket: !Ref "ReportS3Bucket"
+      FunctionName: GetExternalAccounts
+      Handler: external_account_audit.main
+      MemorySize: 512
+      Role: !GetAtt 'EvidentReportingLambdaExecutionRole.Arn'
+      Runtime: python3.6
+      Timeout: 120
+    Type: AWS::Lambda::Function
+  MyRule:
+    Properties:
+      Description: My Lambda CloudWatch Event
+      ScheduleExpression: !Join ["", ["rate(", !Ref 'ReportInterval', ")"]]
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt 'MyLambda.Arn'
+          Id: MyLambdaId
+    Type: AWS::Events::Rule
