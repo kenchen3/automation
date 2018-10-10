@@ -1,0 +1,298 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "ESP SNS Integration to Email",
+  "Outputs": {
+    "SNSTopicArn": {
+      "Description": "Evident Integration SNS Topic ARN",
+      "Value": {
+        "Ref": "SNSIntegration"
+      }
+    },
+    "EvidentRoleArn": {
+      "Description": "Evident Service Role (IAM) ARN",
+      "Value": {
+        "Fn::GetAtt": ["ServiceRoleSNSIntegration","Arn"]
+      }
+    },
+    "ExternalId": {
+      "Description": "External ID",
+      "Value": {
+        "Fn::Select": [ 2, { "Fn::Split" : [ "/", {"Ref": "AWS::StackId"} ] }]
+      }
+    },
+    "EmailLambdaFunction": {
+      "Description": "Lambda function that parses SNS alert message and push to EMAIL_SNS ",
+      "Value": { "Ref": "LambdaFunction"}
+    }
+  },
+
+
+  "Parameters": {
+    "TargetEmail": {
+      "Description": "Specicy an email address to be subscribed to SNS",
+      "MinLength": "1",
+      "Type": "String",
+      "Default": "my@email.com"
+    },
+
+    "EmailSNSTopicName": {
+      "Description": "Display Name for the SNS Topic which will be used to send email alert",
+      "MinLength": "1",
+      "Type": "String",
+      "Default": "Evident-SNS-to-email"
+    },
+
+    "SNSIntegrationTopicName": {
+      "Description": "Display Name for the SNS Topic",
+      "MinLength": "1",
+      "Type": "String",
+      "Default": "Evident-alert-to-SNS-integration"
+    },
+
+    "EspEvidentAccountId": {
+      "Description": "EvidentIO Account ID",
+      "Default": "613698206329",
+      "AllowedPattern": "[0-9]+",
+      "MaxLength": "12",
+      "MinLength": "12",
+      "Type": "String"
+    }
+  },
+
+  "Resources": {
+    "ServiceRoleSNSIntegration": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "EvidentCrossAccountAccess",
+              "Action": "sts:AssumeRole",
+              "Condition": {
+                "StringEquals": {
+                  "sts:ExternalId": {
+                    "Fn::Select": [ 2, { "Fn::Split" : [ "/", {"Ref": "AWS::StackId"} ] }]
+                  }
+                }
+              },
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::Join": ["", [
+                      "arn:aws:iam::",
+                      {"Ref": "EspEvidentAccountId"},
+                      ":root"
+                    ]
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "EvidentSNSIntegration",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "sns:Publish"
+                  ],
+                  "Resource": {
+                    "Ref": "SNSIntegration"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+
+    "SNSEmail": {
+      "Type": "AWS::SNS::Topic",
+      "Properties": {
+        "DisplayName": {"Ref": "EmailSNSTopicName"}
+      }
+    },
+
+    "SNSEmailSubcription" : {
+      "Type" : "AWS::SNS::Subscription",
+      "Properties" : {
+        "Endpoint" : {"Ref" : "TargetEmail"},
+        "Protocol" : "email",
+        "TopicArn" : {"Ref" : "SNSEmail"}
+      }
+    },
+
+    "SNSIntegration": {
+      "Type": "AWS::SNS::Topic",
+      "Properties": {
+        "DisplayName": {"Ref": "SNSIntegrationTopicName"},
+        "Subscription": [{
+          "Endpoint": {"Fn::GetAtt": [ "LambdaFunction", "Arn" ]},
+          "Protocol": "lambda"
+        }]
+      },
+      "DependsOn": ["LambdaFunction"]
+    },
+
+    "LambdaRole" : {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "ManagedPolicyArns": [
+          "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+        ],
+        "AssumeRolePolicyDocument": {
+          "Version" : "2012-10-17",
+          "Statement": [ 
+            {
+              "Sid": "EvidentLambdaFunction",
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com"
+              }
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "PublishSNS",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": ["sns:Publish"],
+                  "Resource": { "Ref": "SNSEmail"}
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+
+    "LambdaInvokePerm": {
+      "Type": "AWS::Lambda::Permission",
+      "Properties": {
+        "Action": "lambda:InvokeFunction",
+        "Principal": "sns.amazonaws.com",
+        "SourceArn": { "Ref": "SNSIntegration" },
+        "FunctionName": { "Fn::GetAtt": [ "LambdaFunction", "Arn" ]}
+      },
+      "DependsOn": ["LambdaFunction"]
+    },
+
+    "LambdaFunction" : {
+      "Type": "AWS::Lambda::Function",
+      "Description": "Parses ESP Alert from SNS and push to Lambda",
+      "Properties": {
+        "Handler": "index.lambda_handler",
+        "Runtime": "python3.6",
+        "Role": { "Fn::GetAtt" : [ "LambdaRole", "Arn"] },
+        "Timeout": "30",
+        "Environment": {
+          "Variables": {
+            "EMAIL_SNS_TOPIC" : {"Ref": "SNSEmail"}
+          }
+        },
+        "Code" :{
+          "ZipFile" : { "Fn::Join" : ["\n", [
+            "from __future__ import print_function",
+            "import boto3",
+            "import json",
+            "import os",
+            "",
+            "def lambda_handler(event, context):",
+            "    #### Change the email subject line, if desired ####",
+            "    email_subject = 'Evident.io Alert'",
+            "",
+            "    message = json.loads(event['Records'][0]['Sns']['Message'])",
+            "",
+            "    # Init values (false if protection)",
+            "    a_aws_account = ''",
+            "    a_aws_region = ''",
+            "    a_name = ''",
+            "    a_id = ''",
+            "    a_description = ''",
+            "    a_remediation = ''",
+            "    a_aws_tags = ''",
+            "    a_ua_event_name = ''",
+            "    a_ua_event_time = ''",
+            "    a_ua_username = ''",
+            "    a_ua_arn = ''",
+            "    a_ua_ip = ''",
+            "    a_ua_user_agent = ''",
+            "    has_cloud_trail = False",
+            "    has_aws_tags = False",
+            "",
+            "    # Get the alert data from the JSON and convert to strings",
+            "    a_started = str(message['data']['attributes']['started_at'])",
+            "    a_risk_level = str(message['data']['attributes']['risk_level'])",
+            "    a_aws_resource_id = str(message['data']['attributes']['resource'])",
+            "    a_status = str(message['data']['attributes']['status'])",
+            "    for i in message['included']:",
+            "        if i['type'] == 'external_accounts':",
+            "            a_aws_account = str(i['attributes']['name'])",
+            "        elif i['type'] == 'regions':",
+            "            a_aws_region = str(i['attributes']['code'])",
+            "        elif i['type'] == 'signatures':",
+            "            a_name = str(i['attributes']['name'])",
+            "            a_id = str(i['attributes']['identifier'])",
+            "            a_description = str(i['attributes']['description'])",
+            "            a_remediation = str(i['attributes']['resolution'])",
+            "        elif i['type'] == 'custom_signatures':",
+            "            a_name = str(i['attributes']['name'])",
+            "            a_id = str(i['attributes']['identifier'])",
+            "            a_description = str(i['attributes']['description'])",
+            "            a_remediation = str(i['attributes']['resolution'])",
+            "        elif i['type'] == 'cloud_trail_events':",
+            "            a_ua_event_name = str(i['attributes']['event_name'])",
+            "            a_ua_event_time = str(i['attributes']['event_time'])",
+            "            a_ua_username = str(i['attributes']['username'])",
+            "            a_ua_arn = str(i['attributes']['arn'])",
+            "            a_ua_ip = str(i['attributes']['ip_address'])",
+            "            a_ua_user_agent = str(i['attributes']['user_agent'])",
+            "            has_cloud_trail = True",
+            "        elif i['type'] == 'tags':",
+            "            a_aws_tags = a_aws_tags + str(i['attributes']['key']) + ': ' + str(i['attributes']['value']) + '\\n'",
+            "            has_aws_tags = True",
+            "",
+            "    # Format email body in text (SNS does not support HTML e-mail at this time)",
+            "    msg_body = 'An Evident.io alert had been generated!\\n \\n'",
+            "    msg_body +=  'Alert Name : ' + a_name + '\\n \\n'",
+            "    msg_body +=  'Alert ID: ' + a_id + '\\n\\n'",
+            "    msg_body +=  'Risk Level: ' + a_risk_level + '\\n\\n'",
+            "    msg_body +=  'Alert Status: ' + a_status + '\\n\\n'",
+            "    msg_body +=  'Alert Started: ' + a_started + '\\n\\n'",
+            "    msg_body +=  'AWS Resource ID: ' + a_aws_resource_id + '\\n\\n'",
+            "    msg_body +=  'AWS Account Name: ' + a_aws_account + '\\n\\n'",
+            "    msg_body +=  'AWS Region: ' + a_aws_region + '\\n\\n'",
+            "    msg_body +=  '-Alert Description-\\n' + a_description + '\\n\\n'",
+            "    msg_body +=  '-Alert Remediation-\\n' + a_remediation + '\\n\\n'",
+            "    if has_aws_tags:",
+            "        msg_body +=  '-Alert Tags-\\n' + a_aws_tags + '\\n\\n'",
+            "    if has_cloud_trail:",
+            "        msg_body +=  '-User Attribution-\\n\\n'",
+            "        msg_body +=  'Event Name: ' + a_ua_event_name + '\\n\\n'",
+            "        msg_body +=  'Event Time: ' + a_ua_event_time + '\\n\\n'",
+            "        msg_body +=  'Username: ' + a_ua_username + '\\n\\n'",
+            "        msg_body +=  'ARN: ' + a_ua_arn + '\\n\\n'",
+            "        msg_body +=  'IP Address: ' + a_ua_ip + '\\n\\n'",
+            "        msg_body +=  'User Agent: ' + a_ua_user_agent + '\\n\\n'",
+            "",
+            "    # Send email body back to SNS",
+            "    sns = boto3.client('sns')",
+            "    sns.publish(TopicArn=os.getenv('EMAIL_SNS_TOPIC',None), Subject=email_subject, Message=msg_body)"
+
+          ]]}
+        }
+      }
+    }
+  }
+}
